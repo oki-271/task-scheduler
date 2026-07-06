@@ -1,2 +1,2 @@
 # task-scheduler
-Isolated-Core Task Scheduler &amp; Jitter Analyzer
+Isolated-Core Task Scheduler & Jitter Analyzer

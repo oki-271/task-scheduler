@@ -1,64 +1,86 @@
+/**
+ * @file scheduler.h
+ * @brief Public API for the multi-core scheduler engine.
+ */
+
 #ifndef SCHEDULER_H
 #define SCHEDULER_H
 
 #include <stdint.h>
 #include <stdbool.h>
 
-#define SCHEDULER_MAX_CORES 16
+#define MAX_WORKERS 16
 
-typedef struct {
-    uint64_t total_tasks;
-    uint64_t total_latency_cycles;
-    uint64_t max_latency_cycles;
-    uint64_t min_latency_cycles;
-} CoreStats;
+/**
+ * @brief Structural topologies to benchmark queue contention.
+ */
+typedef enum {
+    TOPOLOGY_SHARED_QUEUE,       /* 1 Centralized MPMC Ring -> N Workers (N=1 is the Pipeline Baseline) */
+    TOPOLOGY_DISTRIBUTED_QUEUES  /* N Dedicated SPSC Rings -> N Workers (Algos compete here) */
+} QueueTopology;
 
-typedef struct {
-    uint32_t valid_core_count;
-    int core_ids[SCHEDULER_MAX_CORES];
-    CoreStats per_core[SCHEDULER_MAX_CORES];
-} SchedulerStats;
+/**
+ * @brief Advanced routing algorithms to evaluate cache-locality and balance.
+ */
+typedef enum {
+    ALGO_ROUND_ROBIN,
+    ALGO_LEAST_LOADED,
+    ALGO_FLOW_AFFINITY,
+    ALGO_WORK_STEALING,
+    ALGO_LOTTERY
+} SchedulingAlgo;
 
-/* 1. Generic Task Representation */
-typedef struct {
-    void (*callback)(void *arg);  /* Function pointer to execute */
-    void *arg;                    /* Context/Arguments for the callback */
-    uint64_t enqueue_tsc;     /* Timestamp captured when task enters the scheduler */
-} Task;
-
-/* 2. Generic Configuration Representation */
+/**
+ * @brief Power/Latency balancing strategy for low-level core loops.
+ */
 typedef enum {
     WAITING_STRATEGY_PURE_POLLING,
     WAITING_STRATEGY_ADAPTIVE_YIELD
 } WaitingStrategy;
 
+/**
+ * @brief Bounded task packet containing the workload payload.
+ */
 typedef struct {
-    int target_cpu_core;        /* Dedicated core ID for thread affinity pinning */
-    uint32_t max_queue_size;    /* Bounded size for internal tracking ring buffers */
-    bool enable_mem_lock;       /* Toggle to execute mlockall on start */
-    WaitingStrategy strategy;   /* Strategy for the worker loop when queue is empty */
-    
-    void *extended_config;      /* Extension hook for specific implementation parameters */
+    void (*callback)(void *);   /* Target workload function pointer */
+    void *arg;                  /* Opaque payload argument pointer */
+    uint64_t enqueue_tsc;       /* Hardware timestamp captured at push */
+    uint32_t flow_id;           /* Flow identifier for affinity routing tests */
+} Task;
+
+/**
+ * @brief Flat configuration matrix to easily orchestrate test variations.
+ */
+typedef struct {
+    QueueTopology topology;
+    SchedulingAlgo algo;
+    WaitingStrategy strategy;
+    uint32_t num_workers;
+    int worker_cores[MAX_WORKERS];
+    uint32_t max_queue_size;
 } SchedulerConfig;
 
-/* 3. The Operation Table */
-typedef struct SchedulerOps {
-    /**
-     * @brief Allocates and initializes inner structures using generic configuration.
-     * @param self Pointer to top-level context wrapper.
-     * @param config Hand-shake config parameters.
-     */
-    int (*init)(void *self, const SchedulerConfig *config);
-    int (*start)(void *self);
-    int (*stop)(void *self);
-    int (*push_task)(void *self, Task task);
-    int (*get_stats)(void *self, void *stats_out, size_t stats_size);
-} SchedulerOps;
+/* --- Core Synchronous Public API --- */
 
-/* 4. The Top-Level Context Wrapper */
-typedef struct {
-    const SchedulerOps *ops;     /* Pointer to the active behavior table */
-    void *private_data;         /* Pointer to the concrete scheduler memory block */
-} Scheduler;
+/**
+ * @brief Allocates global DPDK infrastructure blocks based on topology.
+ * @return 0 on success, -1 on failure.
+ */
+int scheduler_init(const SchedulerConfig *config);
 
-#endif /* SCHEDULER_H */
+/**
+ * @brief Pushes a task copy into the pipeline using lock-free mechanisms.
+ * @return 0 on success, -1 on failure (queue overflow).
+ */
+int scheduler_push(Task task);
+
+/**
+ * @brief Launches dedicated low-latency worker loops on specific CPU cores.
+ * @return 0 on success, -1 on infrastructure failure.
+ */
+int scheduler_start(void);
+
+/**
+ * @brief Signals and safely synchronizes the shutdown sequence of all cores.
+ */
+void scheduler_stop(void);

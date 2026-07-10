@@ -83,4 +83,6 @@ int scheduler_start(void);
 /**
  * @brief Signals and safely synchronizes the shutdown sequence of all cores.
  */
-void scheduler_stop(void);
+int scheduler_stop(void);
+
+#endif /* SCHEDULER_H */

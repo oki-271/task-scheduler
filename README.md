@@ -71,49 +71,65 @@ grep Huge /proc/meminfo
 Note: To make this configuration permanent across system reboots, add vm.nr_hugepages = 512 to your /etc/sysctl.conf file.
 
 
-
-Step 3: Workspace Directory Setup
-Create the isolated development tree block layout and step into the project directory:
-
-Bash
-mkdir -p task-scheduler/include task-scheduler/src task-scheduler/tests task-scheduler/benchmarks
-cd task-scheduler
-Populate the directories with your corresponding source components before executing the next compilation stage.
-
-
-
-Step 4: Building the Workspace
+Step 3: Building the Workspace
 Generate the build system configuration and compile the binaries under aggressive Release configurations with the inline profiling feature switched on:
 
 Bash
-cmake -B build -S . -DENABLE_PROFILING_FEATURE=ON
-cmake --build build --config Release
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DENABLE_PROFILING_FEATURE=ON
+cmake --build build
 
-
-
-Step 5: Running Functional Correctness (Unit Tests)
+Step 4: Running Functional Correctness (Unit Tests)
 Execute the non-blocking validation harness to verify bounding checks, edge constraints, and setup invariants:
 
 Bash
-./build/tests/unit_tests
+sudo ./build/tests/unit_tests
 
 
 
-Step 6: Running Architectural Benchmarks (Performance Arena)
+Step 5: Running Architectural Benchmarks (Performance Arena)
 Execute the multi-scenario traffic simulation harness. Root privileges are strictly required to authorize DPDK hardware core affinity pinning and hugepage mappings:
 
 Bash
 sudo ./build/benchmarks/perf_harness
+
 Example Performance Telemetry Report
 Once execution cycles gracefully spin down and the worker threads are joined, the post-execution analyzer safe-window prints a micro-architectural breakdown map translating raw TSC ticks to localized fractional nanoseconds:
 
-====================================================================================
-                       AUTOMATED PROFILER ARCHITECTURAL REPORT                     
-====================================================================================
+████████████████████████████████████████████████████████████████████████████████████
+█ SCENARIO: [1] BASELINE (1 Core, Central Shared Queue)
+████████████████████████████████████████████████████████████████████████████████████
+  => Topology   : SHARED MPMC
+  => Workers    : 1 Cores
+  => Queue Size : 4096 Slots
+
+  .------------------------------------------------------------------------------.
+  | STRATEGY : PURE POLLING (100% CPU Continuous Spin)                           |
+  | PROFILE  : LATENCY FOCUSED (Paced Traffic + Micro Bursts)                    |
+  '------------------------------------------------------------------------------'
 Core Index | Total Packets   | Avg Latency(ns)    | Min Latency(ns) | Max Latency(ns)
 ------------------------------------------------------------------------------------
-Worker 0   | 25000           | 42.15              | 12.00           | 184.50
-Worker 1   | 25000           | 44.60              | 11.50           | 192.10
-Worker 2   | 25000           | 41.90              | 12.10           | 175.25
-Worker 3   | 25000           | 43.02              | 11.80           | 189.00
-====================================================================================
+Worker 0   | 105639          | 10234.78           | 68.91           | 329909.86      
+
+  .------------------------------------------------------------------------------.
+  | STRATEGY : PURE POLLING (100% CPU Continuous Spin)                           |
+  | PROFILE  : THROUGHPUT FOCUSED (Max Saturation / Backpressure)                |
+  '------------------------------------------------------------------------------'
+Core Index | Total Packets   | Avg Latency(ns)    | Min Latency(ns) | Max Latency(ns)
+------------------------------------------------------------------------------------
+Worker 0   | 160000          | 312155.05          | 72.52           | 361358.97      
+
+  .------------------------------------------------------------------------------.
+  | STRATEGY : ADAPTIVE YIELD (Hardware Pause / _mm_pause)                       |
+  | PROFILE  : LATENCY FOCUSED (Paced Traffic + Micro Bursts)                    |
+  '------------------------------------------------------------------------------'
+Core Index | Total Packets   | Avg Latency(ns)    | Min Latency(ns) | Max Latency(ns)
+------------------------------------------------------------------------------------
+Worker 0   | 105602          | 10290.87           | 70.91           | 332232.37      
+
+  .------------------------------------------------------------------------------.
+  | STRATEGY : ADAPTIVE YIELD (Hardware Pause / _mm_pause)                       |
+  | PROFILE  : THROUGHPUT FOCUSED (Max Saturation / Backpressure)                |
+  '------------------------------------------------------------------------------'
+Core Index | Total Packets   | Avg Latency(ns)    | Min Latency(ns) | Max Latency(ns)
+------------------------------------------------------------------------------------
+Worker 0   | 160000          | 312349.36          | 73.32           | 355071.71      

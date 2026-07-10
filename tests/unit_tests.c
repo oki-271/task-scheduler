@@ -5,6 +5,9 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <rte_eal.h>
+
 #include "scheduler.h"
 
 /* --- Ultra-Lightweight Inline Micro Testing Framework --- */
@@ -26,11 +29,6 @@ static int g_tests_failed = 0;
     test_func(); \
     printf("\n"); \
 } while(0)
-
-/* --- Mock Workload Callbacks --- */
-static void mock_callback(void *arg) {
-    (void)arg;
-}
 
 /* --- Concrete Test Suite Operations --- */
 
@@ -62,9 +60,9 @@ static void test_init_rejects_excessive_workers(void) {
 static void test_init_accepts_valid_shared_config(void) {
     SchedulerConfig valid_cfg = {
         .topology = TOPOLOGY_SHARED_QUEUE,
-        .num_workers = 2,
-        .worker_cores = {2, 3},
-        .max_queue_size = 512,
+        .num_workers = 1,
+        .worker_cores = {1},
+        .max_queue_size = 256,
         .strategy = WAITING_STRATEGY_PURE_POLLING
     };
     
@@ -72,25 +70,38 @@ static void test_init_accepts_valid_shared_config(void) {
     EXPECT_EQUAL(0, status, "scheduler_init must succeed under optimal validated operational structures");
 }
 
+static void test_start_and_stop(void) {
+    int start_status = scheduler_start();
+    EXPECT_EQUAL(0, start_status, "scheduler_start must succeed under valid configuration");
+
+    int stop_status = scheduler_stop();
+    EXPECT_EQUAL(0, stop_status, "scheduler_stop must succeed after starting the scheduler");
+}
+
 /* --- Testing Entry Orchestration Point --- */
-int main(void) {
+int main(int argc, char **argv) {
     printf("===================================================================\n");
     printf("                  EXECUTION OF CORRECTNESS TESTS                   \n");
     printf("===================================================================\n");
 
+    int eal_ret = rte_eal_init(argc, argv);
+    if (eal_ret < 0) {
+        fprintf(stderr, "[Fatal] DPDK EAL initialization failed in unit tests.\n");
+        return EXIT_FAILURE;
+    }
+
     /* Fire isolated logical validation tests */
     RUN_TEST_CASE(test_init_rejects_null_config);
     RUN_TEST_CASE(test_init_rejects_excessive_workers);
-    
-    /* * Note: Running valid setup tests will expect DPDK resource allocations.
-     * If the underlying hardware or mock drivers are absent, this may return failure.
-     */
     RUN_TEST_CASE(test_init_accepts_valid_shared_config);
+    RUN_TEST_CASE(test_start_and_stop);
+
 
     printf("-------------------------------------------------------------------\n");
     printf("TEST SUITE SUMMARY: %d Executed | %d Passed | %d Failed\n", 
            g_tests_run, (g_tests_run - g_tests_failed), g_tests_failed);
     printf("===================================================================\n");
 
+    rte_eal_cleanup();
     return (g_tests_failed == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

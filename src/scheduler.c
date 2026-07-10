@@ -3,13 +3,12 @@
  * @brief Monolithic execution engine managing multi-core hardware routing paths.
  */
 
+#include <stdio.h>
+#include <string.h>
 #include <rte_ring.h>
 #include <rte_mempool.h>
 #include <rte_cycles.h>
 #include <rte_launch.h>
-#include <stdio.h>
-#include <string.h>
-
 #include "scheduler.h"
 #include "profiler.h"
 
@@ -115,45 +114,60 @@ static int worker_distributed_queue_loop(void *arg)
                     break;
                 }
             }
+            if(stolen) continue;
         }
-        if (!stolen && g_state.config.strategy == WAITING_STRATEGY_ADAPTIVE_YIELD)
+        if (g_state.config.strategy == WAITING_STRATEGY_ADAPTIVE_YIELD)
         {
             rte_pause();
         }
     }
     return 0;
 }
+
+
 /* --- Public API Core Implementation --- */
 
 int scheduler_init(const SchedulerConfig *config)
 {
     if (!config || config->num_workers > MAX_WORKERS)
     {
+        fprintf(stderr, "Invalid scheduler configuration: num_workers exceeds MAX_WORKERS\n");
         return -1;
     }
     char name_buffer[64];
+    static uint32_t init_instance_counter = 0;
 
     /* Clear global container layout safely */
     memset(&g_state, 0, sizeof(GlobalSchedulerState));
     g_state.config = *config;
-    g_state.is_running = false;
 
     /* 1. Allocate highly packed lock-free object memory pool */
-    snprintf(name_buffer, sizeof(name_buffer), "GLOBAL_TASK_POOL_%p", (void *)&g_state);
+    snprintf(name_buffer, sizeof(name_buffer), "TASK_POOL_%u", init_instance_counter);
+
+    uint32_t total_mempool_capacity = config->max_queue_size;
+    if (config->topology == TOPOLOGY_DISTRIBUTED_QUEUES) {
+        total_mempool_capacity = config->max_queue_size * config->num_workers;
+    }
+
     g_state.task_pool = rte_mempool_create(
-        name_buffer, config->max_queue_size, sizeof(Task),
+        name_buffer, total_mempool_capacity, sizeof(Task),
         0, 0, NULL, NULL, NULL, NULL, SOCKET_ID_ANY,
         RTE_MEMPOOL_F_SP_PUT | RTE_MEMPOOL_F_SC_GET);
-    if (!g_state.task_pool)
+    if (!g_state.task_pool) {
+        fprintf(stderr, "Failed to create task pool mempool\n");
         return -1;
+    }
 
     /* 2. Configure structures based on architectural topology definition */
     if (config->topology == TOPOLOGY_SHARED_QUEUE)
     {
-        snprintf(name_buffer, sizeof(name_buffer), "CENTRAL_MPMC_RING_%p", (void *)&g_state);
-        g_state.shared_ring = rte_ring_create(name_buffer, config->max_queue_size, SOCKET_ID_ANY, 0); // 0 flag enforces MPMC
+        char ring_name[64];
+        snprintf(ring_name, sizeof(ring_name), "SHARED_RING_%u", init_instance_counter);
+
+        g_state.shared_ring = rte_ring_create(ring_name, config->max_queue_size, SOCKET_ID_ANY, 0); // 0 flag enforces MPMC
         if (!g_state.shared_ring)
         {
+            fprintf(stderr, "Failed to create shared MPMC ring\n");
             rte_mempool_free(g_state.task_pool);
             return -1;
         }
@@ -162,13 +176,23 @@ int scheduler_init(const SchedulerConfig *config)
     {
         for (uint32_t i = 0; i < config->num_workers; i++)
         {
-            snprintf(name_buffer, sizeof(name_buffer), "DIST_SPSC_RING_%p_%u", (void *)&g_state, i);
+            char ring_name[64];
+            snprintf(ring_name, sizeof(ring_name), "WORKER_RING_%u_%u", init_instance_counter, i);
+
+            unsigned int ring_flags = RING_F_SP_ENQ | RING_F_SC_DEQ; /* Default to SPSC */
+            if (config->algo == ALGO_WORK_STEALING)
+            {
+                ring_flags = 0; // 0 flag enforces MPMC
+            }
+
             g_state.worker_rings[i] = rte_ring_create(
-                name_buffer, config->max_queue_size, SOCKET_ID_ANY,
-                RING_F_SP_ENQ | RING_F_SC_DEQ // Hard SPSC flags for distributed isolation
-            );
+                ring_name, config->max_queue_size, SOCKET_ID_ANY,
+                ring_flags);
+
             if (!g_state.worker_rings[i])
             {
+                fprintf(stderr, "Failed to create worker SPSC ring for worker %u\n", i);
+
                 /* Rollback previously allocated rings to avoid hanging zones */
                 for (uint32_t j = 0; j < i; j++)
                 {
@@ -181,15 +205,17 @@ int scheduler_init(const SchedulerConfig *config)
     }
 
     /* Initialize the telemetry structure to wipe raw memory state variables */
+    init_instance_counter++;
     profiler_init();
     return 0;
 }
 
 int scheduler_push(Task task)
-{
+{    
     Task *task_ptr = NULL;
     if (rte_mempool_get(g_state.task_pool, (void **)&task_ptr) < 0)
     {
+        // fprintf(stderr, "Failed to allocate task from mempool\n");
         return -1; /* Queue dropped due to systemic congestion */
     }
 
@@ -201,6 +227,7 @@ int scheduler_push(Task task)
     {
         if (rte_ring_enqueue(g_state.shared_ring, task_ptr) < 0)
         {
+            // fprintf(stderr, "Failed to enqueue task into shared ring\n");
             rte_mempool_put(g_state.task_pool, task_ptr);
             return -1;
         }
@@ -237,10 +264,12 @@ int scheduler_push(Task task)
         case ALGO_FLOW_AFFINITY:
         {
             worker_idx = task_ptr->flow_id % g_state.config.num_workers;
+            break;
         }
         case ALGO_LOTTERY:
         {
             worker_idx = ((task_ptr->enqueue_tsc) ^ (task_ptr->enqueue_tsc >> 4)) % g_state.config.num_workers;
+            break;
         }
         default:
             /* Placeholders for our next custom implementations */
@@ -250,6 +279,7 @@ int scheduler_push(Task task)
 
         if (rte_ring_enqueue(g_state.worker_rings[worker_idx], task_ptr) < 0)
         {
+            fprintf(stderr, "Failed to enqueue task into worker ring %u\n", worker_idx);
             rte_mempool_put(g_state.task_pool, task_ptr);
             return -1;
         }
@@ -270,18 +300,43 @@ int scheduler_start(void)
         int ret = rte_eal_remote_launch(target_loop, &g_state.worker_ctx[i], g_state.config.worker_cores[i]);
         if (ret < 0)
         {
-            scheduler_stop();
+            fprintf(stderr, "Failed to launch worker thread on core %d\n", g_state.config.worker_cores[i]);
+            (void)scheduler_stop();
             return -1;
         }
     }
     return 0;
 }
 
-void scheduler_stop(void)
+int scheduler_stop(void)
 {
+    while (1)
+    {
+        uint32_t ring_count = 0;
+        if (g_state.config.topology == TOPOLOGY_SHARED_QUEUE)
+        {
+            ring_count = rte_ring_count(g_state.shared_ring);
+        }
+        else
+        {
+            for (uint32_t i = 0; i < g_state.config.num_workers; ++i)
+            {
+                ring_count += rte_ring_count(g_state.worker_rings[i]);
+            }
+        }
+
+        if (ring_count == 0)
+        {
+            break;
+        }
+        rte_pause();
+    }
+
     __atomic_store_n(&g_state.is_running, false, __ATOMIC_RELAXED);
     for (uint32_t i = 0; i < g_state.config.num_workers; i++)
     {
         rte_eal_wait_lcore(g_state.config.worker_cores[i]);
     }
+
+    return 0;
 }
